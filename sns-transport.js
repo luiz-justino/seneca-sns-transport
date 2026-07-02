@@ -22,13 +22,16 @@ function sns_transport(options) {
   let handle_msg = null
 
   function hook_listen_sns(config, ready) {
-    var seneca = this.root.delegate()
+    let seneca = this.root.delegate()
 
     handle_msg = function handle_msg(data, done) {
-      var msg = tu.internalize_msg(seneca, JSON.parse(data))
+      let msg = tu.internalize_msg(
+        seneca,
+        'string' === typeof data ? JSON.parse(data) : data
+      )
 
       seneca.act(msg, function (err, out, meta) {
-        var rep = JSON.stringify(tu.externalize_reply(seneca, err, out, meta))
+        let rep = JSON.stringify(tu.externalize_reply(seneca, err, out, meta))
         return done(rep)
       })
     }
@@ -37,21 +40,25 @@ function sns_transport(options) {
   }
 
   function hook_client_sns(config, ready) {
-    var seneca = this.root.delegate()
+    let seneca = this.root.delegate()
 
     function send_msg(msg, reply, meta) {
-      var msgstr = JSON.stringify(tu.externalize_msg(seneca, msg, meta))
+      let msgstr = JSON.stringify(tu.externalize_msg(seneca, msg, meta))
+      let topicarn = resolve_topic(msg, meta)
       options.SNS().publish(
         {
           Message: msgstr,
-          TopicArn: resolve_topic(msg, meta),
+          TopicArn: topicarn,
         },
         function (err, out) {
-          console.log('SENT', msgstr, err, out)
+          seneca.log.debug('SENT', topicarn)
+          seneca.log.debug('SENT', msgstr)
+          seneca.log.debug('SENT', err)
+          seneca.log.debug('SENT', out)
         }
       )
 
-      // just async
+      // just async msgs
       reply()
     }
 
@@ -62,11 +69,19 @@ function sns_transport(options) {
   }
 
   function lambda_handler(event, context, callback) {
-    let msg = event.Records[0].Sns.Message
-    handle_msg(msg, function (msgstr) {
+    let msg = event.Records
+      ? event.Records[0].Sns.Message
+      : event.routeKey
+      ? { ...event.queryStringParameters, ...event.pathParameters }
+      : event
+
+    handle_msg(msg, function (repstr) {
       const res = {
         statusCode: 200,
-        body: msgstr,
+        headers: {
+          'Access-Control-Allow-Origin': '*', // TODO: option!
+        },
+        body: repstr,
       }
 
       callback(null, res)
@@ -85,7 +100,22 @@ function sns_transport(options) {
   return {
     name: 'sns-transport',
     exportmap: {
-      handler: lambda_handler,
+      lambda_handler: lambda_handler,
+    },
+  }
+}
+
+sns_transport.preload = function (plugin) {
+  let seneca = this.root
+  return {
+    name: 'sns-transport',
+    exportmap: {
+      handler: function sns_handler(event, context, callback) {
+        seneca.ready(function () {
+          let handler = seneca.export('sns-transport/lambda_handler')
+          return handler(event, context, callback)
+        })
+      },
     },
   }
 }
